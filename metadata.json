@@ -1,0 +1,7 @@
+{
+  "name": "T•ZERONE CODE",
+  "description": "Ultra-fast mobile-optimized hybrid code editor and interactive design environment with live multi-engine preview and visual manipulation tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
