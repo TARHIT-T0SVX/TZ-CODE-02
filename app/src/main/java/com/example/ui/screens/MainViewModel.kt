@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.app.Application
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.AppDatabase
@@ -59,6 +60,10 @@ data class MainUiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        private const val TAG = "MainViewModel"
+    }
+
     private val repository: ProjectRepository = ProjectRepository(
         AppDatabase.getDatabase(application).projectDao()
     )
@@ -83,6 +88,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadOrInitWorkspace() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                Log.i(TAG, "Attempting to load saved workspace from database...")
                 val savedProjects = repository.allProjects.firstOrNull()
                 val latestProject = savedProjects?.firstOrNull()
                 if (latestProject != null) {
@@ -91,11 +97,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         withContext(Dispatchers.Main) {
                             restoreWorkspace(latestProject.name, files)
                         }
+                        Log.i(TAG, "Successfully restored workspace '${latestProject.name}' with ${files.size} files")
                         return@launch
                     }
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
+            } catch (e: Throwable) {
+                Log.e(TAG, "Error loading workspace from repository, falling back to clean workspace", e)
             }
 
             withContext(Dispatchers.Main) {
@@ -344,6 +351,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun importSingleFile(fileName: String, content: String) {
+        val newFile = ProjectFile(
+            name = fileName,
+            path = fileName,
+            content = content,
+            isFolder = false
+        )
+        undoStacks[newFile.id] = ArrayDeque(listOf(content))
+        redoStacks[newFile.id] = ArrayDeque()
+
+        _uiState.update { current ->
+            // Replace existing file with same path if present or append new file
+            val existingIndex = current.files.indexOfFirst { it.path.equals(fileName, ignoreCase = true) || it.name.equals(fileName, ignoreCase = true) }
+            val updatedFiles = if (existingIndex != -1) {
+                current.files.mapIndexed { idx, f -> if (idx == existingIndex) newFile else f }
+            } else {
+                current.files + newFile
+            }
+
+            val updatedTabs = if (current.openTabs.any { it.name.equals(fileName, ignoreCase = true) }) {
+                current.openTabs.map { if (it.name.equals(fileName, ignoreCase = true)) newFile else it }
+            } else {
+                current.openTabs + newFile
+            }
+
+            current.copy(
+                files = updatedFiles,
+                openTabs = updatedTabs,
+                activeFileId = newFile.id,
+                canUndo = false,
+                canRedo = false,
+                showOpenModal = false,
+                statusMessage = "Imported $fileName"
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.saveProject(_uiState.value.projectName, _uiState.value.files)
+        }
+    }
+
     fun importFiles(newFiles: List<ProjectFile>) {
         if (newFiles.isEmpty()) return
         viewModelScope.launch(Dispatchers.Default) {
@@ -351,15 +398,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 undoStacks[file.id] = ArrayDeque(listOf(file.content))
                 redoStacks[file.id] = ArrayDeque()
             }
+            val primaryFile = newFiles.firstOrNull { it.name.equals("index.html", ignoreCase = true) }
+                ?: newFiles.firstOrNull { it.extension.equals("html", ignoreCase = true) }
+                ?: newFiles.first()
+
             withContext(Dispatchers.Main) {
                 _uiState.update { current ->
-                    val updated = current.files + newFiles.filter { nf -> current.files.none { it.path == nf.path } }
-                    val tabs = current.openTabs + newFiles.take(3).filter { nf -> current.openTabs.none { it.path == nf.path } }
-                    val firstId = newFiles.firstOrNull()?.id ?: current.activeFileId
+                    val mergedFiles = current.files.filter { cur -> newFiles.none { it.path == cur.path } } + newFiles
+                    val mergedTabs = current.openTabs.filter { cur -> newFiles.none { it.path == cur.path } } + newFiles.take(5)
                     current.copy(
-                        files = updated,
-                        openTabs = tabs,
-                        activeFileId = firstId,
+                        files = mergedFiles,
+                        openTabs = mergedTabs,
+                        activeFileId = primaryFile.id,
                         showOpenModal = false,
                         statusMessage = "Imported ${newFiles.size} files"
                     )
@@ -422,47 +472,187 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Resolves and bundles multi-file project (index.html, styles.css, script.js, svg assets) into standalone preview HTML
+     * Resolves and bundles multi-file project (index.html, styles.css, script.js, svg assets, markdown, etc.) into standalone preview HTML
      */
     fun getBundledHtml(): String {
         val current = _uiState.value
-        val htmlFile = current.files.firstOrNull { it.extension == "html" || it.extension == "htm" }
-            ?: current.files.firstOrNull()
+        val files = current.files
 
-        // Requirement: The preview panel must start completely blank with no initial rendered content.
-        if (htmlFile == null || (htmlFile.content.isBlank() && current.files.all { it.content.isBlank() })) {
-            return "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'><style>body { margin: 0; background: #0D0D0F; color: #888; font-family: monospace; }</style></head><body></body></html>"
+        if (files.isEmpty()) {
+            return "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'><style>body { margin: 0; background: #0D0D0F; color: #888; font-family: monospace; padding: 20px; }</style></head><body>No files in project.</body></html>"
         }
 
-        var html = htmlFile.content
+        // 1. Locate primary entrypoint HTML file
+        val activeFile = files.firstOrNull { it.id == current.activeFileId }
+        val rootIndexHtml = files.firstOrNull { it.name.equals("index.html", ignoreCase = true) }
+        val anyHtml = files.firstOrNull { it.extension.equals("html", ignoreCase = true) || it.extension.equals("htm", ignoreCase = true) }
+        
+        val htmlFile = when {
+            activeFile != null && (activeFile.extension.equals("html", ignoreCase = true) || activeFile.extension.equals("htm", ignoreCase = true)) -> activeFile
+            rootIndexHtml != null -> rootIndexHtml
+            anyHtml != null -> anyHtml
+            activeFile != null -> activeFile
+            else -> files.first()
+        }
 
-        // Inline external CSS links that match project files
-        current.files.filter { it.extension == "css" && it.content.isNotBlank() }.forEach { cssFile ->
-            val linkRegex = Regex("""<link[^>]*href=["'](?:\./)?${Regex.escape(cssFile.name)}["'][^>]*>""", RegexOption.IGNORE_CASE)
-            val styleTag = "<style>\n/* Inlined from ${cssFile.name} */\n${cssFile.content}\n</style>"
-            if (linkRegex.containsMatchIn(html)) {
-                html = html.replace(linkRegex, styleTag)
-            } else if (!html.contains(cssFile.content) && cssFile.name == "styles.css") {
-                html = if (html.contains("</head>", ignoreCase = true)) {
-                    html.replaceFirst(Regex("</head>", RegexOption.IGNORE_CASE), "$styleTag\n</head>")
-                } else {
-                    "$styleTag\n$html"
+        var html: String
+        val isHtmlSource = htmlFile.extension.equals("html", ignoreCase = true) || htmlFile.extension.equals("htm", ignoreCase = true)
+
+        if (isHtmlSource) {
+            html = htmlFile.content
+            if (html.isBlank()) {
+                // If html file is empty, provide a minimal live canvas
+                html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'></head><body></body></html>"
+            }
+        } else if (htmlFile.extension.equals("md", ignoreCase = true) || htmlFile.extension.equals("markdown", ignoreCase = true)) {
+            // Render Markdown preview
+            val escapedMd = htmlFile.content
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            html = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <style>
+                        body { margin: 0; padding: 20px; background: #0D0D0F; color: #ECECED; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; }
+                        pre { background: #18181D; padding: 12px; border-radius: 8px; overflow-x: auto; color: #79B8FF; }
+                        h1, h2, h3 { color: #FFFFFF; border-bottom: 1px solid #282830; padding-bottom: 6px; }
+                        a { color: #0088FF; }
+                    </style>
+                </head>
+                <body>
+                    <pre style="white-space: pre-wrap; font-family: monospace;">$escapedMd</pre>
+                </body>
+                </html>
+            """.trimIndent()
+        } else if (htmlFile.extension.equals("css", ignoreCase = true)) {
+            // Render CSS preview demo
+            html = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <style>
+                    ${htmlFile.content}
+                    </style>
+                </head>
+                <body>
+                    <div style="padding: 24px; font-family: sans-serif;">
+                        <h1>CSS Preview Demo</h1>
+                        <p>Styling applied from ${htmlFile.name}</p>
+                        <button class="btn primary">Sample Button</button>
+                        <div class="card" style="margin-top: 16px; padding: 16px; border: 1px solid #444; border-radius: 8px;">
+                            Sample Card Box
+                        </div>
+                    </div>
+                </body>
+                </html>
+            """.trimIndent()
+        } else if (htmlFile.extension.equals("js", ignoreCase = true) || htmlFile.extension.equals("ts", ignoreCase = true)) {
+            // Render JS preview with console output canvas
+            html = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <style>
+                        body { margin: 0; padding: 20px; background: #0D0D0F; color: #ECECED; font-family: monospace; }
+                        #output { background: #16161A; border: 1px solid #2C2C35; border-radius: 8px; padding: 16px; min-height: 120px; white-space: pre-wrap; }
+                        h2 { color: #0088FF; margin-top: 0; font-size: 16px; }
+                    </style>
+                </head>
+                <body>
+                    <h2>Running: ${htmlFile.name}</h2>
+                    <div id="output"></div>
+                    <script>
+                        const out = document.getElementById('output');
+                        const append = (msg, col) => {
+                            const d = document.createElement('div');
+                            d.style.color = col || '#ECECED';
+                            d.textContent = msg;
+                            out.appendChild(d);
+                        };
+                        console.log = (...args) => { append(args.join(' '), '#99FFE4'); };
+                        console.error = (...args) => { append('Error: ' + args.join(' '), '#FF6B6B'); };
+                        console.warn = (...args) => { append('Warn: ' + args.join(' '), '#FFCC00'); };
+                        try {
+                            ${htmlFile.content}
+                        } catch(e) {
+                            console.error(e.message);
+                        }
+                    </script>
+                </body>
+                </html>
+            """.trimIndent()
+        } else {
+            // Plain text or JSON
+            val escaped = htmlFile.content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            html = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <style>body { margin: 0; padding: 16px; background: #0D0D0F; color: #ECECED; font-family: monospace; white-space: pre-wrap; }</style>
+                </head>
+                <body>$escaped</body>
+                </html>
+            """.trimIndent()
+        }
+
+        if (isHtmlSource) {
+            // 2. Comprehensive multi-file resolution for CSS
+            files.filter { it.extension.equals("css", ignoreCase = true) && it.content.isNotBlank() }.forEach { cssFile ->
+                val escapedName = Regex.escape(cssFile.name)
+                val escapedPath = Regex.escape(cssFile.path)
+                // Match <link rel="stylesheet" href="...styles.css"> variations (relative, absolute, ./, etc.)
+                val linkRegex = Regex("""<link\b[^>]*href=["'](?:\./)?(?:${escapedPath}|${escapedName})["'][^>]*>""", RegexOption.IGNORE_CASE)
+                val styleTag = "<style>\n/* [TZeron Inlined: ${cssFile.name}] */\n${cssFile.content}\n</style>"
+                
+                if (linkRegex.containsMatchIn(html)) {
+                    html = html.replace(linkRegex, styleTag)
+                } else if (cssFile.name.equals("style.css", ignoreCase = true) || cssFile.name.equals("styles.css", ignoreCase = true) || cssFile.name.equals("main.css", ignoreCase = true) || cssFile.name.equals("app.css", ignoreCase = true)) {
+                    // Auto-inject standard style sheets if not explicitly linked
+                    if (!html.contains(cssFile.content)) {
+                        html = if (html.contains("</head>", ignoreCase = true)) {
+                            html.replaceFirst(Regex("</head>", RegexOption.IGNORE_CASE), "$styleTag\n</head>")
+                        } else {
+                            "$styleTag\n$html"
+                        }
+                    }
                 }
             }
-        }
 
-        // Inline external JS scripts that match project files
-        current.files.filter { (it.extension == "js" || it.extension == "ts") && it.content.isNotBlank() }.forEach { jsFile ->
-            val scriptRegex = Regex("""<script[^>]*src=["'](?:\./)?${Regex.escape(jsFile.name)}["'][^>]*>\s*</script>""", RegexOption.IGNORE_CASE)
-            val scriptTag = "<script>\n// Inlined from ${jsFile.name}\n${jsFile.content}\n</script>"
-            if (scriptRegex.containsMatchIn(html)) {
-                html = html.replace(scriptRegex, scriptTag)
-            } else if (!html.contains(jsFile.content) && jsFile.name == "script.js") {
-                html = if (html.contains("</body>", ignoreCase = true)) {
-                    html.replaceFirst(Regex("</body>", RegexOption.IGNORE_CASE), "$scriptTag\n</body>")
-                } else {
-                    "$html\n$scriptTag"
+            // 3. Comprehensive multi-file resolution for JS / TS
+            files.filter { (it.extension.equals("js", ignoreCase = true) || it.extension.equals("ts", ignoreCase = true)) && it.content.isNotBlank() }.forEach { jsFile ->
+                val escapedName = Regex.escape(jsFile.name)
+                val escapedPath = Regex.escape(jsFile.path)
+                // Match <script src="...script.js"></script>
+                val scriptRegex = Regex("""<script\b[^>]*src=["'](?:\./)?(?:${escapedPath}|${escapedName})["'][^>]*>\s*</script>""", RegexOption.IGNORE_CASE)
+                val scriptTag = "<script>\n// [TZeron Inlined: ${jsFile.name}]\n${jsFile.content}\n</script>"
+                
+                if (scriptRegex.containsMatchIn(html)) {
+                    html = html.replace(scriptRegex, scriptTag)
+                } else if (jsFile.name.equals("script.js", ignoreCase = true) || jsFile.name.equals("main.js", ignoreCase = true) || jsFile.name.equals("app.js", ignoreCase = true) || jsFile.name.equals("index.js", ignoreCase = true)) {
+                    // Auto-inject standard scripts if not explicitly linked
+                    if (!html.contains(jsFile.content)) {
+                        html = if (html.contains("</body>", ignoreCase = true)) {
+                            html.replaceFirst(Regex("</body>", RegexOption.IGNORE_CASE), "$scriptTag\n</body>")
+                        } else {
+                            "$html\n$scriptTag"
+                        }
+                    }
                 }
+            }
+
+            // 4. Resolve inlined SVG or inline image files
+            files.filter { it.extension.equals("svg", ignoreCase = true) && it.content.isNotBlank() }.forEach { svgFile ->
+                val escapedName = Regex.escape(svgFile.name)
+                val escapedPath = Regex.escape(svgFile.path)
+                val encodedSvg = "data:image/svg+xml;utf8," + java.net.URLEncoder.encode(svgFile.content, "UTF-8")
+                val imgRegex = Regex("""(<img\b[^>]*src=["'])(?:\./)?(?:${escapedPath}|${escapedName})(["'][^>]*>)""", RegexOption.IGNORE_CASE)
+                html = html.replace(imgRegex) { m -> "${m.groupValues[1]}$encodedSvg${m.groupValues[2]}" }
             }
         }
 
@@ -539,11 +729,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importZipBytes(zipBytes: ByteArray) {
         viewModelScope.launch(Dispatchers.Default) {
-            val extractedFiles = ZipUtils.extractArchive(zipBytes)
-            if (extractedFiles.isNotEmpty()) {
+            try {
+                val extractedFiles = ZipUtils.extractArchive(zipBytes)
+                if (extractedFiles.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        importFiles(extractedFiles)
+                        _uiState.update { it.copy(statusMessage = "Unpacked ${extractedFiles.size} files from archive") }
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        _uiState.update { it.copy(statusMessage = "No valid code or text files found in archive") }
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "Error importing zip bytes", e)
                 withContext(Dispatchers.Main) {
-                    importFiles(extractedFiles)
-                    _uiState.update { it.copy(statusMessage = "Unpacked ${extractedFiles.size} files from archive") }
+                    _uiState.update { it.copy(statusMessage = "Failed unpacking archive: ${e.message}") }
                 }
             }
         }

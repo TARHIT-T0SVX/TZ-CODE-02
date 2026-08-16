@@ -66,26 +66,32 @@ fun MainScreen(
             coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
                     var fileName = "imported_file.txt"
-                    context.contentResolver.query(it, null, null, null, null)?.use { cursor ->
-                        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        if (nameIndex != -1 && cursor.moveToFirst()) {
-                            fileName = cursor.getString(nameIndex) ?: fileName
+                    try {
+                        context.contentResolver.query(it, null, null, null, null)?.use { cursor ->
+                            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (nameIndex != -1 && cursor.moveToFirst()) {
+                                fileName = cursor.getString(nameIndex) ?: fileName
+                            }
                         }
-                    }
+                    } catch (_: Exception) {}
 
                     context.contentResolver.openInputStream(it)?.use { stream ->
                         val bytes = stream.readBytes()
-                        val content = String(bytes, Charsets.UTF_8)
+                        val content = try {
+                            String(bytes, Charsets.UTF_8)
+                        } catch (_: Exception) {
+                            String(bytes, java.nio.charset.Charset.forName("ISO-8859-1"))
+                        }
                         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                            viewModel.addNewFile(fileName)
-                            viewModel.updateActiveFileContent(content)
+                            viewModel.importSingleFile(fileName, content)
                             viewModel.setModalState(open = false)
                             Toast.makeText(context, "Loaded $fileName", Toast.LENGTH_SHORT).show()
                         }
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
+                    android.util.Log.e("MainScreen", "Failed reading file from uri: $it", e)
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                        Toast.makeText(context, "Failed to read file", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Failed to read file: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -122,7 +128,11 @@ fun MainScreen(
                                     try {
                                         context.contentResolver.openInputStream(child.uri)?.use { stream ->
                                             val bytes = stream.readBytes()
-                                            val content = String(bytes, Charsets.UTF_8)
+                                            val content = try {
+                                                String(bytes, Charsets.UTF_8)
+                                            } catch (_: Exception) {
+                                                String(bytes, java.nio.charset.Charset.forName("ISO-8859-1"))
+                                            }
                                             importedList.add(
                                                 ProjectFile(
                                                     name = childName,
@@ -149,7 +159,8 @@ fun MainScreen(
                             }
                         }
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
+                    android.util.Log.e("MainScreen", "Failed to import directory", e)
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                         Toast.makeText(context, "Failed to import directory: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
@@ -165,16 +176,32 @@ fun MainScreen(
         uri?.let {
             coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
+                    var archiveName = "project.zip"
+                    try {
+                        context.contentResolver.query(it, null, null, null, null)?.use { cursor ->
+                            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (nameIndex != -1 && cursor.moveToFirst()) {
+                                archiveName = cursor.getString(nameIndex) ?: archiveName
+                            }
+                        }
+                    } catch (_: Exception) {}
+
                     context.contentResolver.openInputStream(it)?.use { stream ->
-                        val zipBytes = stream.readBytes()
+                        val extracted = ZipUtils.extractArchiveFromStream(stream, archiveName)
                         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                            viewModel.importZipBytes(zipBytes)
-                            viewModel.setModalState(open = false)
+                            if (extracted.isNotEmpty()) {
+                                viewModel.importFiles(extracted)
+                                viewModel.setModalState(open = false)
+                                Toast.makeText(context, "Unpacked ${extracted.size} files from $archiveName", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "No valid files found in archive", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
+                    android.util.Log.e("MainScreen", "Failed to extract archive", e)
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                        Toast.makeText(context, "Failed to extract archive", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Failed to extract archive: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -193,7 +220,7 @@ fun MainScreen(
         uiState.files.firstOrNull { it.id == uiState.activeFileId }
     }
 
-    val bundledHtml = remember(uiState.files) {
+    val bundledHtml = remember(uiState.files, uiState.activeFileId) {
         viewModel.getBundledHtml()
     }
 
@@ -201,21 +228,24 @@ fun MainScreen(
     val openExternalBrowser = {
         try {
             val html = viewModel.getBundledHtml()
-            val file = java.io.File(context.cacheDir, "tzeron_live_preview.html")
-            file.writeText(html)
-            val uri = androidx.core.content.FileProvider.getUriForFile(
+            val uri = com.example.utils.FileExportUtils.writeToSecureCache(
                 context,
-                "${context.packageName}.fileprovider",
-                file
+                "tzeron_live_preview.html",
+                html
             )
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "text/html")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (uri != null) {
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "text/html")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } else {
+                Toast.makeText(context, "Could not open external browser", Toast.LENGTH_SHORT).show()
             }
-            context.startActivity(intent)
         } catch (e: Exception) {
-            Toast.makeText(context, "Live preview active in browser", Toast.LENGTH_SHORT).show()
+            android.util.Log.e("MainScreen", "Failed to launch external browser preview", e)
+            Toast.makeText(context, "Could not launch external browser: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 

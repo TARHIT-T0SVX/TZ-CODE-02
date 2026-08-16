@@ -42,7 +42,7 @@ fun CodeEditorView(
         mutableStateOf(TextFieldValue(fileContent))
     }
 
-    LaunchedEffect(fileContent) {
+    LaunchedEffect(fileName, fileContent) {
         if (textFieldValue.text != fileContent) {
             textFieldValue = textFieldValue.copy(text = fileContent)
         }
@@ -203,68 +203,85 @@ class SyntaxHighlightVisualTransformation(
 
     override fun filter(text: AnnotatedString): TransformedText {
         val raw = text.text
+        if (raw.isEmpty()) {
+            return TransformedText(text, OffsetMapping.Identity)
+        }
         val builder = AnnotatedString.Builder(raw)
 
-        when (extension.lowercase()) {
-            "html", "htm", "svg", "xml" -> highlightHtml(raw, builder)
-            "css", "scss", "less" -> highlightCss(raw, builder)
-            "js", "ts", "jsx", "tsx", "json" -> highlightJs(raw, builder)
-            "md", "markdown" -> highlightMarkdown(raw, builder)
-            else -> highlightGeneric(raw, builder)
+        try {
+            when (extension.lowercase()) {
+                "html", "htm", "svg", "xml" -> highlightHtml(raw, builder)
+                "css", "scss", "less" -> highlightCss(raw, builder)
+                "js", "ts", "jsx", "tsx", "json" -> highlightJs(raw, builder)
+                "md", "markdown" -> highlightMarkdown(raw, builder)
+                else -> highlightGeneric(raw, builder)
+            }
+            return TransformedText(builder.toAnnotatedString(), OffsetMapping.Identity)
+        } catch (_: Exception) {
+            return TransformedText(text, OffsetMapping.Identity)
         }
+    }
 
-        return TransformedText(builder.toAnnotatedString(), OffsetMapping.Identity)
+    private fun safeAddSpan(builder: AnnotatedString.Builder, style: SpanStyle, start: Int, end: Int, maxLen: Int) {
+        val s = start.coerceIn(0, maxLen)
+        val e = end.coerceIn(0, maxLen)
+        if (s < e) {
+            builder.addStyle(style, s, e)
+        }
     }
 
     private fun highlightHtml(text: String, builder: AnnotatedString.Builder) {
+        val len = text.length
         Regex("""</?([a-zA-Z0-9\-]+)""").findAll(text).forEach { m ->
             val group = m.groups[1]
             if (group != null) {
-                builder.addStyle(SpanStyle(color = tagColor, fontWeight = FontWeight.SemiBold), group.range.first, group.range.last + 1)
+                safeAddSpan(builder, SpanStyle(color = tagColor, fontWeight = FontWeight.SemiBold), group.range.first, group.range.last + 1, len)
             }
         }
         Regex("""\s+([a-zA-Z0-9\-]+)(?==)""").findAll(text).forEach { m ->
             val group = m.groups[1]
             if (group != null) {
-                builder.addStyle(SpanStyle(color = attrColor), group.range.first, group.range.last + 1)
+                safeAddSpan(builder, SpanStyle(color = attrColor), group.range.first, group.range.last + 1, len)
             }
         }
         Regex(""""[^"]*"|'[^']*'""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = stringColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = stringColor), m.range.first, m.range.last + 1, len)
         }
         Regex("""<!--[\s\S]*?-->""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = commentColor, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = commentColor, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic), m.range.first, m.range.last + 1, len)
         }
     }
 
     private fun highlightCss(text: String, builder: AnnotatedString.Builder) {
+        val len = text.length
         Regex("""(^|\n|\})\s*([^{\n]+)\s*\{""").findAll(text).forEach { m ->
             val group = m.groups[2]
             if (group != null) {
-                builder.addStyle(SpanStyle(color = tagColor, fontWeight = FontWeight.Bold), group.range.first, group.range.last + 1)
+                safeAddSpan(builder, SpanStyle(color = tagColor, fontWeight = FontWeight.Bold), group.range.first, group.range.last + 1, len)
             }
         }
         Regex("""([a-zA-Z\-]+)\s*:""").findAll(text).forEach { m ->
             val group = m.groups[1]
             if (group != null) {
-                builder.addStyle(SpanStyle(color = attrColor), group.range.first, group.range.last + 1)
+                safeAddSpan(builder, SpanStyle(color = attrColor), group.range.first, group.range.last + 1, len)
             }
         }
         Regex(""":\s*([^;\}]+)""").findAll(text).forEach { m ->
             val group = m.groups[1]
             if (group != null) {
-                builder.addStyle(SpanStyle(color = stringColor), group.range.first, group.range.last + 1)
+                safeAddSpan(builder, SpanStyle(color = stringColor), group.range.first, group.range.last + 1, len)
             }
         }
         Regex("""\b(\d+(\.\d+)?)(px|rem|em|%|vh|vw|s|ms|deg)?\b""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = numColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = numColor), m.range.first, m.range.last + 1, len)
         }
         Regex("""/\*[\s\S]*?\*/""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = commentColor, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = commentColor, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic), m.range.first, m.range.last + 1, len)
         }
     }
 
     private fun highlightJs(text: String, builder: AnnotatedString.Builder) {
+        val len = text.length
         val keywords = setOf(
             "const", "let", "var", "function", "return", "if", "else", "for", "while",
             "switch", "case", "break", "import", "export", "default", "from", "class",
@@ -273,41 +290,43 @@ class SyntaxHighlightVisualTransformation(
         )
         Regex("""\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b""").findAll(text).forEach { m ->
             if (keywords.contains(m.value)) {
-                builder.addStyle(SpanStyle(color = keywordColor, fontWeight = FontWeight.Bold), m.range.first, m.range.last + 1)
+                safeAddSpan(builder, SpanStyle(color = keywordColor, fontWeight = FontWeight.Bold), m.range.first, m.range.last + 1, len)
             }
         }
         Regex("""\b([a-zA-Z0-9_$]+)\s*(?=\()""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = funcColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = funcColor), m.range.first, m.range.last + 1, len)
         }
         Regex(""""[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|`[^`\\]*(?:\\.[^`\\]*)*`""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = stringColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = stringColor), m.range.first, m.range.last + 1, len)
         }
         Regex("""\b(\d+(\.\d+)?)\b""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = numColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = numColor), m.range.first, m.range.last + 1, len)
         }
         Regex("""//.*|/\*[\s\S]*?\*/""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = commentColor, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = commentColor, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic), m.range.first, m.range.last + 1, len)
         }
     }
 
     private fun highlightMarkdown(text: String, builder: AnnotatedString.Builder) {
+        val len = text.length
         Regex("""^#{1,6}\s+.*""", RegexOption.MULTILINE).findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = tagColor, fontWeight = FontWeight.Bold), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = tagColor, fontWeight = FontWeight.Bold), m.range.first, m.range.last + 1, len)
         }
         Regex("""\[([^\]]+)\]\(([^)]+)\)""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = funcColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = funcColor), m.range.first, m.range.last + 1, len)
         }
         Regex("""`([^`]+)`""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = stringColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = stringColor), m.range.first, m.range.last + 1, len)
         }
     }
 
     private fun highlightGeneric(text: String, builder: AnnotatedString.Builder) {
+        val len = text.length
         Regex(""""[^"]*"|'[^']*'""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = stringColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = stringColor), m.range.first, m.range.last + 1, len)
         }
         Regex("""\b(\d+)\b""").findAll(text).forEach { m ->
-            builder.addStyle(SpanStyle(color = numColor), m.range.first, m.range.last + 1)
+            safeAddSpan(builder, SpanStyle(color = numColor), m.range.first, m.range.last + 1, len)
         }
     }
 }
