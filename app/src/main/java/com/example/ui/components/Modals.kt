@@ -254,7 +254,8 @@ fun OpenProjectModal(
 fun FormatTransformModal(
     onDismiss: () -> Unit,
     onFormat: () -> Unit,
-    onCombine: () -> Unit
+    onCombine: () -> Unit,
+    onSplit: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -301,6 +302,32 @@ fun FormatTransformModal(
                         Column {
                             Text("Auto-Beautify / Format", color = TZeronTextPrimary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             Text("Standardizes indentation, spacing, and tags.", color = TZeronTextSecondary, fontSize = 10.sp)
+                        }
+                    }
+                }
+
+                // Split Code Tool (Requirement: extract HTML/CSS/JS with linked dependencies)
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            onSplit()
+                            onDismiss()
+                        }
+                        .testTag("tool_split_btn"),
+                    color = TZeronSurfaceElevated,
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(0.5.dp, TZeronBorder)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(imageVector = TZeronIcons.Split, contentDescription = null, tint = TZeronAccentBlue)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text("Split Code (Extract HTML/CSS/JS)", color = TZeronTextPrimary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("Separates inline <style> and <script> into styles.css & script.js.", color = TZeronTextSecondary, fontSize = 10.sp)
                         }
                     }
                 }

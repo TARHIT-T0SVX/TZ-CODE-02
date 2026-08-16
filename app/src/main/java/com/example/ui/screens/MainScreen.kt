@@ -38,6 +38,9 @@ import com.example.data.model.ProjectFile
 import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.utils.ZipUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -48,6 +51,7 @@ fun MainScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
 
     // System Clipboard helper
     val clipboardManager = remember {
@@ -59,25 +63,31 @@ fun MainScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let {
-            try {
-                var fileName = "imported_file.txt"
-                context.contentResolver.query(it, null, null, null, null)?.use { cursor ->
-                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (nameIndex != -1 && cursor.moveToFirst()) {
-                        fileName = cursor.getString(nameIndex) ?: fileName
+            coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    var fileName = "imported_file.txt"
+                    context.contentResolver.query(it, null, null, null, null)?.use { cursor ->
+                        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIndex != -1 && cursor.moveToFirst()) {
+                            fileName = cursor.getString(nameIndex) ?: fileName
+                        }
+                    }
+
+                    context.contentResolver.openInputStream(it)?.use { stream ->
+                        val bytes = stream.readBytes()
+                        val content = String(bytes, Charsets.UTF_8)
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            viewModel.addNewFile(fileName)
+                            viewModel.updateActiveFileContent(content)
+                            viewModel.setModalState(open = false)
+                            Toast.makeText(context, "Loaded $fileName", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, "Failed to read file", Toast.LENGTH_SHORT).show()
                     }
                 }
-
-                context.contentResolver.openInputStream(it)?.use { stream ->
-                    val bytes = stream.readBytes()
-                    val content = String(bytes, Charsets.UTF_8)
-                    viewModel.addNewFile(fileName)
-                    viewModel.updateActiveFileContent(content)
-                    viewModel.setModalState(open = false)
-                    Toast.makeText(context, "Loaded $fileName", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                Toast.makeText(context, "Failed to read file", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -87,57 +97,63 @@ fun MainScreen(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { treeUri ->
         treeUri?.let { uri ->
-            try {
+            coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
-                    val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    context.contentResolver.takePersistableUriPermission(uri, takeFlags)
-                } catch (_: Exception) {}
+                    try {
+                        val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        context.contentResolver.takePersistableUriPermission(uri, takeFlags)
+                    } catch (_: Exception) {}
 
-                val rootDoc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, uri)
-                if (rootDoc != null && rootDoc.isDirectory) {
-                    val folderName = rootDoc.name ?: "Imported Workspace"
-                    val importedList = mutableListOf<ProjectFile>()
+                    val rootDoc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, uri)
+                    if (rootDoc != null && rootDoc.isDirectory) {
+                        val folderName = rootDoc.name ?: "Imported Workspace"
+                        val importedList = mutableListOf<ProjectFile>()
 
-                    fun traverseDirectory(doc: androidx.documentfile.provider.DocumentFile, relativePrefix: String) {
-                        val children = doc.listFiles()
-                        for (child in children) {
-                            val childName = child.name ?: continue
-                            // Skip hidden or build cache directories
-                            if (childName.startsWith(".") || childName == "node_modules" || childName == "dist") continue
-                            val relPath = if (relativePrefix.isEmpty()) childName else "$relativePrefix/$childName"
-                            if (child.isDirectory) {
-                                traverseDirectory(child, relPath)
-                            } else if (child.isFile) {
-                                try {
-                                    context.contentResolver.openInputStream(child.uri)?.use { stream ->
-                                        val bytes = stream.readBytes()
-                                        val content = String(bytes, Charsets.UTF_8)
-                                        importedList.add(
-                                            ProjectFile(
-                                                name = childName,
-                                                path = relPath,
-                                                content = content,
-                                                isFolder = false
+                        fun traverseDirectory(doc: androidx.documentfile.provider.DocumentFile, relativePrefix: String) {
+                            val children = doc.listFiles()
+                            for (child in children) {
+                                val childName = child.name ?: continue
+                                // Skip hidden or build cache directories
+                                if (childName.startsWith(".") || childName == "node_modules" || childName == "dist") continue
+                                val relPath = if (relativePrefix.isEmpty()) childName else "$relativePrefix/$childName"
+                                if (child.isDirectory) {
+                                    traverseDirectory(child, relPath)
+                                } else if (child.isFile) {
+                                    try {
+                                        context.contentResolver.openInputStream(child.uri)?.use { stream ->
+                                            val bytes = stream.readBytes()
+                                            val content = String(bytes, Charsets.UTF_8)
+                                            importedList.add(
+                                                ProjectFile(
+                                                    name = childName,
+                                                    path = relPath,
+                                                    content = content,
+                                                    isFolder = false
+                                                )
                                             )
-                                        )
-                                    }
-                                } catch (_: Exception) {}
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+                            }
+                        }
+
+                        traverseDirectory(rootDoc, "")
+
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            if (importedList.isNotEmpty()) {
+                                viewModel.importDirectoryWorkspace(folderName, importedList)
+                                viewModel.setModalState(open = false)
+                                Toast.makeText(context, "Loaded directory '$folderName' (${importedList.size} files)", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Selected directory has no readable files", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
-
-                    traverseDirectory(rootDoc, "")
-
-                    if (importedList.isNotEmpty()) {
-                        viewModel.importDirectoryWorkspace(folderName, importedList)
-                        viewModel.setModalState(open = false)
-                        Toast.makeText(context, "Loaded directory '$folderName' (${importedList.size} files)", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Selected directory has no readable files", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, "Failed to import directory: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
-            } catch (e: Exception) {
-                Toast.makeText(context, "Failed to import directory: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -147,14 +163,20 @@ fun MainScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let {
-            try {
-                context.contentResolver.openInputStream(it)?.use { stream ->
-                    val zipBytes = stream.readBytes()
-                    viewModel.importZipBytes(zipBytes)
-                    viewModel.setModalState(open = false)
+            coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    context.contentResolver.openInputStream(it)?.use { stream ->
+                        val zipBytes = stream.readBytes()
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            viewModel.importZipBytes(zipBytes)
+                            viewModel.setModalState(open = false)
+                        }
+                    }
+                } catch (e: Exception) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, "Failed to extract archive", Toast.LENGTH_SHORT).show()
+                    }
                 }
-            } catch (e: Exception) {
-                Toast.makeText(context, "Failed to extract archive", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -222,7 +244,7 @@ fun MainScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // Left Section: Branding Logo & Workspace Name
+                    // Left Section: Branding Logo & Main Brand Title
                     Row(
                         modifier = Modifier.clickable { viewModel.toggleExplorer() },
                         verticalAlignment = Alignment.CenterVertically,
@@ -235,34 +257,25 @@ fun MainScreen(
                             border = androidx.compose.foundation.BorderStroke(0.5.dp, TZeronBorder)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = TZeronIcons.Code,
-                                    contentDescription = "T•ZERONE CODE",
-                                    tint = TZeronAccentBlue,
-                                    modifier = Modifier.size(18.dp)
+                                androidx.compose.foundation.Image(
+                                    painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.ic_teezron_logo),
+                                    contentDescription = "T•ZERONE CODE Logo",
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
                         }
 
-                        Column {
-                            Text(
-                                text = "T•ZERONE CODE",
-                                color = TZeronTextPrimary,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
-                                letterSpacing = 0.5.sp
-                            )
-                            Text(
-                                text = uiState.projectName,
-                                color = TZeronTextMuted,
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
+                        Text(
+                            text = "T•ZERONE CODE",
+                            color = TZeronTextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            letterSpacing = 0.5.sp
+                        )
                     }
 
-                    // Right-aligned Action Bar: New, Open/Import, Format & Transform, Explorer (Folder), Download (Far Top-Right)
+                    // Right-aligned Action Bar: New, Open/Import, Format & Transform, Download (Far Top-Right)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -286,14 +299,6 @@ fun MainScreen(
                             contentDescription = "Format & Transform",
                             testTag = "top_action_format",
                             onClick = { viewModel.setModalState(format = true) }
-                        )
-
-                        HeaderActionButton(
-                            icon = TZeronIcons.FolderOpen,
-                            contentDescription = "Toggle Explorer",
-                            testTag = "top_action_explorer",
-                            isActive = uiState.isExplorerOpen,
-                            onClick = { viewModel.toggleExplorer() }
                         )
 
                         HeaderActionButton(
@@ -326,40 +331,38 @@ fun MainScreen(
             }
         },
         bottomBar = {
-            // Hide bottom navigation bar when software keyboard is open so the Thumb Zone rests directly above the keyboard
-            if (!isImeVisible) {
-                Surface(
+            // Persistent Fixed Bottom Navigation Bar (Permanently visible across all views)
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .testTag("bottom_nav_bar"),
+                color = TZeronSurface,
+                border = androidx.compose.foundation.BorderStroke(1.dp, TZeronBorder)
+            ) {
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.navigationBars)
-                        .testTag("bottom_nav_bar"),
-                    color = TZeronSurface,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, TZeronBorder)
+                        .height(58.dp)
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(58.dp)
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        NavBottomTabItem(
-                            icon = TZeronIcons.Code,
-                            label = "CODE EDITOR",
-                            isActive = uiState.activeNavTab == MainNavTab.EDIT,
-                            onClick = { viewModel.setNavTab(MainNavTab.EDIT) },
-                            testTag = "nav_edit_mode"
-                        )
+                    NavBottomTabItem(
+                        icon = TZeronIcons.Code,
+                        label = "CODE EDITOR",
+                        isActive = uiState.activeNavTab == MainNavTab.EDIT,
+                        onClick = { viewModel.setNavTab(MainNavTab.EDIT) },
+                        testTag = "nav_edit_mode"
+                    )
 
-                        NavBottomTabItem(
-                            icon = TZeronIcons.Eye,
-                            label = "PREVIEW & RUN",
-                            isActive = uiState.activeNavTab == MainNavTab.PREVIEW,
-                            onClick = { viewModel.setNavTab(MainNavTab.PREVIEW) },
-                            testTag = "nav_preview_mode"
-                        )
-                    }
+                    NavBottomTabItem(
+                        icon = TZeronIcons.Eye,
+                        label = "PREVIEW",
+                        isActive = uiState.activeNavTab == MainNavTab.PREVIEW,
+                        onClick = { viewModel.setNavTab(MainNavTab.PREVIEW) },
+                        testTag = "nav_preview_mode"
+                    )
                 }
             }
         }
@@ -381,7 +384,8 @@ fun MainScreen(
                                 activeFileId = uiState.activeFileId,
                                 onSelectTab = { viewModel.selectTab(it) },
                                 onCloseTab = { viewModel.closeTab(it) },
-                                onAddTab = { viewModel.addNewFile("new_file_${System.currentTimeMillis()}.html") }
+                                onAddTab = { viewModel.addNewFile("new_file_${System.currentTimeMillis()}.html") },
+                                onToggleExplorer = { viewModel.toggleExplorer() }
                             )
 
                             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -452,7 +456,7 @@ fun MainScreen(
                         }
                     }
 
-                    // 2. PREVIEW & RUN PANE (Instant Zero-Latency Rendering)
+                    // 2. PREVIEW PANE (Instant Zero-Latency Rendering)
                     if (uiState.activeNavTab == MainNavTab.PREVIEW) {
                         Column(modifier = Modifier.fillMaxSize()) {
                             Row(
@@ -562,7 +566,8 @@ fun MainScreen(
             FormatTransformModal(
                 onDismiss = { viewModel.setModalState(format = false) },
                 onFormat = { viewModel.formatCurrentCode() },
-                onCombine = { viewModel.combineWorkspaceFiles() }
+                onCombine = { viewModel.combineWorkspaceFiles() },
+                onSplit = { viewModel.splitActiveHtml() }
             )
         }
 
@@ -572,16 +577,13 @@ fun MainScreen(
                 files = uiState.files,
                 onDismiss = { viewModel.setModalState(download = false) },
                 onDownloadSpecificFile = { file ->
-                    clipboardManager.setPrimaryClip(ClipData.newPlainText(file.name, file.content))
-                    Toast.makeText(context, "Exported ${file.name} to clipboard", Toast.LENGTH_SHORT).show()
+                    viewModel.exportCurrentFile(context)
                 },
                 onDownloadCombinedHtml = {
-                    clipboardManager.setPrimaryClip(ClipData.newPlainText("Standalone HTML Bundle", bundledHtml))
-                    Toast.makeText(context, "Exported standalone HTML bundle to clipboard", Toast.LENGTH_SHORT).show()
+                    viewModel.exportCombinedHtml(context)
                 },
                 onDownloadZipArchive = {
-                    val zipBytes = ZipUtils.createZipArchive(uiState.files)
-                    Toast.makeText(context, "Generated .ZIP package (${zipBytes.size} bytes)", Toast.LENGTH_SHORT).show()
+                    viewModel.exportWorkspaceZip(context)
                 }
             )
         }
@@ -590,10 +592,10 @@ fun MainScreen(
             PublicTunnelModal(
                 tunnelUrl = uiState.tunnelUrl,
                 isActive = uiState.isTunnelActive,
-                onToggleTunnel = { viewModel.toggleTunnel() },
+                onToggleTunnel = { viewModel.toggleTunnel(context) },
                 onCopyUrl = {
                     clipboardManager.setPrimaryClip(ClipData.newPlainText("Tunnel URL", uiState.tunnelUrl))
-                    Toast.makeText(context, "Copied Live Tunnel URL", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Copied Live Network Link", Toast.LENGTH_SHORT).show()
                 },
                 onDismiss = { viewModel.setModalState(tunnel = false) }
             )

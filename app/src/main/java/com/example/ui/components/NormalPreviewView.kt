@@ -227,25 +227,25 @@ fun NormalPreviewView(
                 }
             }
 
-            // Actions: Universal (Browser), Local (Tunnel), Terminal, Reset (Relocated to top right corner)
+            // Actions: Local (Browser), Public (Tunnel), Terminal, Reset
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
-                // 1. UNIVERSAL Action Button
+                // 1. LOCAL Action Button (Opens in local device browser)
                 PreviewActionButton(
-                    icon = TZeronIcons.Public,
-                    contentDescription = "Open in External Browser",
-                    label = "UNIVERSAL",
+                    icon = TZeronIcons.Desktop,
+                    contentDescription = "Open in Local Browser",
+                    label = "LOCAL",
                     onClick = onOpenExternalBrowser,
-                    testTag = "preview_external_browser_btn"
+                    testTag = "preview_local_browser_btn"
                 )
 
-                // 2. LOCAL / LIVE Tunnel Button
+                // 2. PUBLIC / LIVE Tunnel Button (Shares over LAN/Public network)
                 PreviewActionButton(
-                    icon = if (isTunnelActive) TZeronIcons.Public else TZeronIcons.Offline,
-                    contentDescription = "Public Tunnel",
-                    label = if (isTunnelActive) "LIVE" else "LOCAL",
+                    icon = TZeronIcons.Public,
+                    contentDescription = "Public LAN Hosting",
+                    label = if (isTunnelActive) "LIVE" else "PUBLIC",
                     isActive = isTunnelActive,
                     onClick = { onOpenTunnelModal() },
                     testTag = "preview_tunnel_btn"
@@ -447,34 +447,46 @@ private fun PreviewActionButton(
         else -> TZeronTextPrimary
     }
 
+    val isSquare = label.isEmpty()
+
     Surface(
         modifier = Modifier
             .scale(scale)
+            .height(28.dp)
+            .then(if (isSquare) Modifier.width(28.dp) else Modifier)
             .clickable(interactionSource = interaction, indication = null) { onClick() }
             .testTag(testTag),
         color = bgColor,
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(8.dp),
         border = androidx.compose.foundation.BorderStroke(0.5.dp, borderColor)
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = if (label.isNotEmpty()) 8.dp else 6.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Box(
+            modifier = Modifier.then(
+                if (isSquare) Modifier.fillMaxSize()
+                else Modifier.padding(horizontal = 8.dp)
+            ),
+            contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = contentDescription,
-                tint = iconTint,
-                modifier = Modifier.size(13.dp)
-            )
-            if (label.isNotEmpty()) {
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = label,
-                    color = textColor,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = contentDescription,
+                    tint = iconTint,
+                    modifier = Modifier.size(13.dp)
                 )
+                if (label.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = label,
+                        color = textColor,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
             }
         }
     }

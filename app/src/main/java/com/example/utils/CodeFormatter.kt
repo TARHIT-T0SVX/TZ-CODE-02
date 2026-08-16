@@ -147,33 +147,32 @@ object CodeFormatter {
         val cssContent = extractedStyles.joinToString("\n\n")
         val jsContent = extractedScripts.joinToString("\n\n")
 
-        // Add link and script tags to cleaned HTML if we extracted any styles/scripts
-        if (cssContent.isNotBlank()) {
-            val linkTag = "\n  <link rel=\"stylesheet\" href=\"style.css\">\n"
-            cleanedHtml = if (cleanedHtml.contains("</head>", ignoreCase = true)) {
-                cleanedHtml.replaceFirst(Regex("</head>", RegexOption.IGNORE_CASE), "$linkTag</head>")
-            } else {
-                linkTag + cleanedHtml
+        // Add link and script tags to cleaned HTML if we extracted any styles/scripts or if creating linked files
+        if (cssContent.isNotBlank() || htmlContent.isNotBlank()) {
+            val linkTag = "\n  <link rel=\"stylesheet\" href=\"styles.css\">\n"
+            if (!cleanedHtml.contains("styles.css")) {
+                cleanedHtml = if (cleanedHtml.contains("</head>", ignoreCase = true)) {
+                    cleanedHtml.replaceFirst(Regex("</head>", RegexOption.IGNORE_CASE), "$linkTag</head>")
+                } else {
+                    linkTag + cleanedHtml
+                }
             }
         }
 
-        if (jsContent.isNotBlank()) {
+        if (jsContent.isNotBlank() || htmlContent.isNotBlank()) {
             val scriptTag = "\n  <script src=\"script.js\"></script>\n"
-            cleanedHtml = if (cleanedHtml.contains("</body>", ignoreCase = true)) {
-                cleanedHtml.replaceFirst(Regex("</body>", RegexOption.IGNORE_CASE), "$scriptTag</body>")
-            } else {
-                cleanedHtml + scriptTag
+            if (!cleanedHtml.contains("script.js")) {
+                cleanedHtml = if (cleanedHtml.contains("</body>", ignoreCase = true)) {
+                    cleanedHtml.replaceFirst(Regex("</body>", RegexOption.IGNORE_CASE), "$scriptTag</body>")
+                } else {
+                    cleanedHtml + scriptTag
+                }
             }
         }
 
         resultFiles.add(ProjectFile(name = "index.html", path = "index.html", content = formatHtml(cleanedHtml)))
-
-        if (cssContent.isNotBlank()) {
-            resultFiles.add(ProjectFile(name = "style.css", path = "style.css", content = formatCss(cssContent)))
-        }
-        if (jsContent.isNotBlank()) {
-            resultFiles.add(ProjectFile(name = "script.js", path = "script.js", content = formatJs(jsContent)))
-        }
+        resultFiles.add(ProjectFile(name = "styles.css", path = "styles.css", content = formatCss(cssContent)))
+        resultFiles.add(ProjectFile(name = "script.js", path = "script.js", content = formatJs(jsContent)))
 
         return resultFiles
     }

@@ -38,6 +38,7 @@ fun EditorTabBar(
     onSelectTab: (ProjectFile) -> Unit,
     onCloseTab: (ProjectFile) -> Unit,
     onAddTab: () -> Unit,
+    onToggleExplorer: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -48,53 +49,96 @@ fun EditorTabBar(
             .height(44.dp)
             .background(TZeronSurface)
             .border(0.5.dp, TZeronBorder)
-            .horizontalScroll(scrollState)
             .padding(horizontal = 6.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        openFiles.forEach { file ->
-            val isActive = file.id == activeFileId
-            EditorTabItem(
-                file = file,
-                isActive = isActive,
-                onSelect = { onSelectTab(file) },
-                onClose = { onCloseTab(file) }
-            )
-        }
-
-        // Add Tab Button
-        val addInteraction = remember { MutableInteractionSource() }
-        val isAddPressed by addInteraction.collectIsPressedAsState()
-        val addScale by animateFloatAsState(
-            targetValue = if (isAddPressed) 0.86f else 1.0f,
+        // Workspace Folder Drawer Toggle Button
+        val folderInteraction = remember { MutableInteractionSource() }
+        val isFolderPressed by folderInteraction.collectIsPressedAsState()
+        val folderScale by animateFloatAsState(
+            targetValue = if (isFolderPressed) 0.86f else 1.0f,
             animationSpec = spring(
                 dampingRatio = Spring.DampingRatioMediumBouncy,
                 stiffness = Spring.StiffnessMedium
             ),
-            label = "add_tab_scale"
+            label = "folder_btn_scale"
         )
 
         Surface(
             modifier = Modifier
-                .padding(start = 4.dp)
+                .padding(end = 6.dp)
                 .size(30.dp)
-                .scale(addScale)
+                .scale(folderScale)
                 .clickable(
-                    interactionSource = addInteraction,
+                    interactionSource = folderInteraction,
                     indication = null
-                ) { onAddTab() }
-                .testTag("add_tab_button"),
+                ) { onToggleExplorer() }
+                .testTag("workshop_folder_explorer_btn"),
             color = TZeronSurfaceElevated,
             shape = RoundedCornerShape(10.dp),
             border = androidx.compose.foundation.BorderStroke(0.5.dp, TZeronBorderSubtle)
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(
-                    imageVector = TZeronIcons.Add,
-                    contentDescription = "Add new file tab",
-                    tint = TZeronTextSecondary,
+                    imageVector = TZeronIcons.FolderOpen,
+                    contentDescription = "Project File Explorer",
+                    tint = TZeronAccentBlue,
                     modifier = Modifier.size(15.dp)
                 )
+            }
+        }
+
+        // Horizontal scrolling tabs
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(scrollState),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            openFiles.forEach { file ->
+                val isActive = file.id == activeFileId
+                EditorTabItem(
+                    file = file,
+                    isActive = isActive,
+                    onSelect = { onSelectTab(file) },
+                    onClose = { onCloseTab(file) }
+                )
+            }
+
+            // Add Tab Button
+            val addInteraction = remember { MutableInteractionSource() }
+            val isAddPressed by addInteraction.collectIsPressedAsState()
+            val addScale by animateFloatAsState(
+                targetValue = if (isAddPressed) 0.86f else 1.0f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium
+                ),
+                label = "add_tab_scale"
+            )
+
+            Surface(
+                modifier = Modifier
+                    .padding(start = 4.dp)
+                    .size(30.dp)
+                    .scale(addScale)
+                    .clickable(
+                        interactionSource = addInteraction,
+                        indication = null
+                    ) { onAddTab() }
+                    .testTag("add_tab_button"),
+                color = TZeronSurfaceElevated,
+                shape = RoundedCornerShape(10.dp),
+                border = androidx.compose.foundation.BorderStroke(0.5.dp, TZeronBorderSubtle)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = TZeronIcons.Add,
+                        contentDescription = "Add new file tab",
+                        tint = TZeronTextSecondary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
             }
         }
     }
